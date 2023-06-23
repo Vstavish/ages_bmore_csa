@@ -1,0 +1,147 @@
+---
+title: "ages_map"
+author: "Victoria Stavish"
+date: "2023-06-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# load libraries
+# I just always add this group of libraries because unless I'm doing something fancy I rarely need anything else. 
+
+```{r}
+library(tidyverse)
+library(janitor)
+library(ggplot2)
+library(stringr)
+#install.packages("writexl")
+library(writexl)
+library(lubridate)
+
+```
+
+# Clean up census tract data
+
+```{r}
+
+# read in census tract data, which is from https://data.census.gov/table?g=050XX00US24510$1400000&d=DEC+Demographic+Profile&tid=DECENNIALDP2020.DP1 
+census_tracts <- read.csv("census_tracts.csv")
+
+census_tracts <- census_tracts %>%
+  clean_names() %>%
+  as.data.frame()
+
+# get rid of all rows except age and tract
+  
+census_tracts <- census_tracts[-c(1, 8:174),]
+
+# filter columns for only counts, not percents
+
+census_tracts <- census_tracts %>% select(-contains("percent"))
+
+# make every value a character, just to make sure all columns have the same tyoe of data for now
+
+census_tracts <- census_tracts %>% mutate_if(is.numeric, as.character)
+
+# transpose dataframe so that census tracts are all in their own column
+
+census_tracts <- census_tracts %>%
+pivot_longer(!label_grouping, names_to='tract', values_to='count')
+
+# transpose dataframe so that population and age grouping counts each have their own column
+
+census_tracts <- census_tracts %>%
+pivot_wider(names_from = label_grouping, values_from = count)
+
+# clean up column names again after transposing 
+
+census_tracts <- census_tracts %>%
+  clean_names() %>%
+  as.data.frame() 
+
+```
+
+# I read in the BNIA csa and census crosswalk. I cleaned this data up in Google sheets prior to reading it in. What I did in Google sheets was add columns with the corresponding census tract in the same format that those census tracts appear in the 'census_tracts.csv'. The columns I added are columns 3 through 5.
+
+```{r}
+
+# read in bnia census and csa crosswalk. Here is where the data is downloaded from https://mapping-bniajfi.opendata.arcgis.com/datasets/bniajfi::census-tract-2020-to-community-statistical-area-2020/explore
+
+census_csa <- read_csv("census_tract_csa.csv")
+
+# rename the column 'crosswalk' to 'tract' to easily join with census_tracts.csv
+
+colnames(census_csa)[5] ="tract"
+
+# Here is where I anti-joined the bnia crosswalk dataframe with the census tract dataframe to ensure everything matched up and I wasn't losing any rows when I join the two, though I commented it out after checking.
+
+#csa_tract_antijoin <- census_csa %>% anti_join(census_tracts, by = join_by(tract))
+
+# inner join the two dataframes 
+
+csa_tract_join <- census_csa %>% inner_join(census_tracts, by = join_by(tract))
+
+# change all the columns with counts to numeric. To do this, I also had to remove the comma from the key columns so that they don't turn into NAs when I convert them to numeric values
+
+csa_tract_join <- csa_tract_join %>%
+  # remove commas 
+  mutate(total_population = str_replace(total_population, ",", "")) %>%
+  mutate(under_5_years = str_replace(under_5_years, ",", "")) %>%
+  mutate(x5_to_9_years = str_replace(x5_to_9_years, ",", "")) %>%
+  mutate(x10_to_14_years = str_replace(x10_to_14_years, ",", "")) %>%
+  mutate(x15_to_19_years = str_replace(x15_to_19_years, ",", "")) %>%
+  mutate(x20_to_24_years = str_replace(x20_to_24_years, ",", "")) %>%
+  # select only the columns I want to see
+  select(csa_2020, tract:x20_to_24_years) %>%
+  # convert columns to numeric values
+  mutate(under_5_years = as.numeric(under_5_years)) %>%
+  mutate(x5_to_9_years = as.numeric(x5_to_9_years)) %>%
+  mutate(x10_to_14_years = as.numeric(x10_to_14_years)) %>%
+  mutate(x15_to_19_years = as.numeric(x15_to_19_years)) %>%
+  mutate(x20_to_24_years = as.numeric(x20_to_24_years)) %>%
+  mutate(total_population = as.numeric(total_population)) %>%
+  # I remove the tract column because no that I've joined, it doesn't serve any purpose 
+  select(-tract)
+
+# sum rows with the same csa name
+csa_tract_join <- aggregate(.~csa_2020,data=csa_tract_join,FUN=sum)
+
+# mutate columns to show % of total population that fall in each age group
+
+csa_tract_join <- csa_tract_join %>%
+  mutate(pct_under_5_years = (under_5_years/total_population)*100) %>%
+  mutate(pct_5_to_9_years = (x5_to_9_years/total_population)*100) %>%
+  mutate(pct_10_to_14_years = (x10_to_14_years/total_population)*100) %>%
+  mutate(pct_15_to_19_years = (x15_to_19_years/total_population)*100) %>%
+  mutate(pct_20_to_24_years = (x20_to_24_years/total_population)*100)
+  
+```
+
+# now I'm adding in a dataframe that includes community statistical area spatial data
+
+```{r}
+
+# read in csa spatial data. Here is where the data is downloaded from https://mapping-bniajfi.opendata.arcgis.com/datasets/bniajfi::community-statistical-areas-2020/explore?location=39.284837%2C-76.620524%2C12.74&showTable=true
+
+csa_2020_final <- read_csv("csa_2020_final.csv") %>%
+  clean_names() %>%
+  as.data.frame() 
+
+# rename the csa name column to match up with the csa name column in csa_tract_join dataframe
+colnames(csa_2020_final)[3] ="csa_2020"
+
+# antijoin to make sure everything matches up and I don't lose anything when I do my inner-join. commented this out after it served its purpose 
+
+# csa_names_antijoin <- csa_2020_final %>% anti_join(csa_tract_join, by = join_by(csa_2020))
+
+# join the dataframe with spatial data with csa_tract_join dataframe by csa name
+csa_names_join <- csa_2020_final %>% inner_join(csa_tract_join, by = join_by(csa_2020))
+
+file <- "ages_and_shapes.csv"
+
+write_xlsx(csa_names_join, file)
+
+```
